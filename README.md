@@ -4,7 +4,7 @@ This repo provides the source codes & data for our paper, *"RADAR: Relation-Assi
 
 ## Overview
 RADAR is proposed to efficiently utilize visual relations in scene graphs for cross-modal entity alignment and Grounded MNER reasoning. An auxiliary textual scene graph is introduced for explicit object-level alignment and bridging the modality gap. Through cross-modal dual-graph alignments assisted by relational features and structures, RADAR significantly eases the process of approaching the ground truth. The framework is shown in Figure 1.
-![framework](figures/radar.png)
+![framework](figures/radar_framework.png)
 
 <p align="center">
     Figure1: Our Framework of RADAR: Relation-Assisted Dual-graph Aligning Recognition. 
