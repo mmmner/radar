@@ -32,7 +32,6 @@ from tqdm import tqdm, trange
 from fastNLP.core.utils import _move_dict_value_to_device
 import random
 import torch
-import numpy as np
 
 fitlog.debug()
 fitlog.set_log_dir('logs')
@@ -52,14 +51,16 @@ parser.add_argument('--model_weight',default= None, type = str)
 parser.add_argument('--normalize',default=False, action = "store_true")
 parser.add_argument('--max_len', default=30, type=int)
 parser.add_argument('--batch_size',default=16,type=int)
+parser.add_argument("--gnn_drop",default=0.5,type=float)
+parser.add_argument("--num_layers",default=2,type=int)
 parser.add_argument("--log",default='./logs',type=str)
-parser.add_argument('--device', default="cuda:0") #'cuda:0'
+parser.add_argument('--device', default=None)#'cuda:0'
 args= parser.parse_args()
 
 
 model_path = args.model_weight.rsplit('/')
-args.pred_output_file = '/'.join(model_path[:-1])+'/total-pred_'+model_path[-1]+'.txt'
-refresh_data=False
+args.pred_output_file = '/'.join(model_path[:-1])+'/pred_'+model_path[-1]+'.txt'
+
 
 dataset_name = 'twitter-ner'
 args.length_penalty = 1
@@ -84,13 +85,14 @@ else:
 if isinstance(args.decoder_type, str) and args.decoder_type.lower() == 'none':
     args.decoder_type = None
 demo = False
+refresh_data=False
 
 if '15' in args.datapath:
-    cache_name='cache/twitter15'
+    cache_name='cache/twitter15'+str(args.box_num)
 elif '17' in args.datapath:
-    cache_name='cache/twitter17'
+    cache_name='cache/twitter17'+str(args.box_num)
 else:
-    cache_name='cache/gmner'
+    cache_name='cache/gmner'+str(args.box_num)
 @cache_results(_cache_fp=cache_name, _refresh=refresh_data)
 def get_data():
 
@@ -123,7 +125,7 @@ label_ids = list(mapping2id.values())
 
 
 model = BartSeq2SeqModel.build_model(args.bart_name, tokenizer, label_ids=label_ids, decoder_type=args.decoder_type,
-                                     use_encoder_mlp=args.use_encoder_mlp,box_num = args.box_num)
+                                     use_encoder_mlp=args.use_encoder_mlp,box_num = args.box_num,args=args)
 
 
 vocab_size = len(tokenizer)
@@ -137,12 +139,13 @@ model = SequenceGeneratorModel(model, bos_token_id=bos_token_id,
 
 model.load_state_dict(torch.load(args.model_weight, map_location=device))
 
-import torch
-if device is None:
-    if torch.cuda.is_available():
-            device = 'cuda'
-    else:
-        device = 'cpu'
+from select_gpu import select_gpu
+if torch.cuda.is_available():
+    if device is None:
+        device = select_gpu()
+    # device = 'cuda:3'
+else:
+    device = 'cpu'
 print('device: '+str(device) + '\n')
 
 
@@ -158,16 +161,14 @@ test_dataset.set_target('raw_words', 'raw_target')
 
 
 
-# test_analysis_saved_path = "./saved_test_analysis/61.3/dev"
-
 device = torch.device(device)
 model.to(device)
 
 def Predict(args,eval_data, model, device, metric,tokenizer,ids2label):
-    data_iterator = DataSetIter(eval_data, batch_size=args.batch_size, sampler=SequentialSampler())
+    data_iterator = DataSetIter(eval_data, batch_size=args.batch_size * 2, sampler=SequentialSampler())
     # for batch_x, batch_y in tqdm(data_iterator, total=len(data_iterator)):
     with open (args.pred_output_file,'w') as fw:
-        for batch_idx, (batch_x, batch_y) in enumerate(data_iterator):
+        for batch_x, batch_y in (data_iterator):
             _move_dict_value_to_device(batch_x, batch_y, device=device)
             src_tokens = batch_x['src_tokens']
             image_feature = batch_x['image_feature']
@@ -185,55 +186,16 @@ def Predict(args,eval_data, model, device, metric,tokenizer,ids2label):
             rel_lens=batch_x['rel_lens']
             rel_trips=batch_x['rel_trips']
             trip_lens=batch_x['trip_lens']
-            # import pdb;pdb.set_trace()
+            # import pdb;pdb.set_trace()//
             results = model.predict(src_tokens,image_feature, src_seq_len=src_seq_len, first=first,object_names=object_names,obj_lens=obj_lens,rel_adjs=rel_adjs,rel_lens=rel_lens,rel_trips=rel_trips,trip_lens=trip_lens)
             pred,region_pred = results['pred'],results['region_pred']   ## logits:(bsz,tgt_len,class+max_len)  region_logits:(??,8)
-            test_analysis = results["test_analysis"]
-
+            
             pred_pairs, target_pairs = metric.evaluate(target_span, pred, tgt_tokens, region_pred,region_label,cover_flag,predict_mode=True)
             
             raw_words = batch_y['raw_words']
             word_start_index = 8 ## 2 + 2 +4
             assert len(pred_pairs) == len(target_pairs)
             for i in range(len(pred_pairs)):
-                input_ids = test_analysis["input_ids"][i]
-                txt_gat_attentions = test_analysis["txt_gat_attentions"][:, i]
-                img_gat_attentions = test_analysis["img_gat_attentions"][:, i]
-                object_names = test_analysis["object_names"][i]
-                object_lens = test_analysis["object_lens"][i]
-                rel_trips = test_analysis["rel_trips"][i]
-                trip_lens = test_analysis["trip_lens"][i]
-                all_attentions = torch.stack([lay[i,:,:,:] for lay in test_analysis["all_attentions"]],dim=0) # 6, 32, 12, 217, 217
-                # import pdb;pdb.set_trace()
-                # txt_node_filter = test_analysis["txt_node_filter"][:, i]
-                # img_node_filter = test_analysis["img_node_filter"][:, i]
-                num = batch_idx*args.batch_size+i
-                # save input_ids
-                # np.save(f"{test_analysis_saved_path}/input_ids/{num}.npy", input_ids.cpu().detach().numpy())
-                # gat
-                # for gat_idx in range(txt_gat_attentions.shape[0]):
-                #     np.save(f"{test_analysis_saved_path}/txt_gat/{num}-layer{gat_idx}.npy", txt_gat_attentions[gat_idx].to(torch.float16).cpu().detach().numpy())
-                #     np.save(f"{test_analysis_saved_path}/img_gat/{num}-layer{gat_idx}.npy", img_gat_attentions[gat_idx].to(torch.float16).cpu().detach().numpy())
-                # object_names
-                # np.save(f"{test_analysis_saved_path}/object_names/{num}.npy", object_names.cpu().detach().numpy())
-                # object_lens
-                # np.save(f"{test_analysis_saved_path}/object_lens/{num}.npy", object_lens.cpu().detach().numpy())
-                # rel_trips
-                # np.save(f"{test_analysis_saved_path}/rel_trips/{num}.npy", rel_trips.cpu().detach().numpy())
-                # trip_lens
-                # np.save(f"{test_analysis_saved_path}/trip_lens/{num}.npy", trip_lens.cpu().detach().numpy())
-                # attentions
-                # np.save(f"{test_analysis_saved_path}/attentions/{num}.npy", all_attentions.to(torch.float16).cpu().detach().numpy())
-                # n_layer, n_head, _, _ = all_attentions.shape
-                # for att_layer_idx in range(n_layer):
-                #     for att_head_idx in range(n_head):
-                #         np.save(f"{test_analysis_saved_path}/attentions/{num}-layer_{att_layer_idx}-head_{att_head_idx}.npy", all_attentions[att_layer_idx, att_head_idx, :, :].to(torch.float16).cpu().detach().numpy())
-    
-                # print(f"{num}, ok")
-                if num == 529: # the sample of cat
-                    text = ' '.join(raw_words[i])
-                    import pdb;pdb.set_trace()
-
                 cur_src_token = src_tokens[i].cpu().numpy().tolist()
                 fw.write(' '.join(raw_words[i])+'\n')
                 fw.write('Pred: ')
@@ -265,7 +227,9 @@ def Predict(args,eval_data, model, device, metric,tokenizer,ids2label):
     return res
 
 
-# import pdb;pdb.set_trace()
+
+
+
 ids2label = {2+i:l for i,l in enumerate(mapping2id.keys())}
 model.eval()
 test_res = Predict(args,eval_data=test_dataset, model=model, device=device, metric = metric,tokenizer=tokenizer,ids2label=ids2label)
